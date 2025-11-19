@@ -1,0 +1,19 @@
+# Pythonキャッシュやビルド関連
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+# 環境変数ファイル
+.env
+
+# VSCode設定
+.vscode/
+
+# OSが生成する不要ファイル
+.DS_Store
+Thumbs.db
