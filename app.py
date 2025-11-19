@@ -1,102 +1,66 @@
-import os
-import re
+import streamlit as st
 import numpy as np
 import torch
 import clip
-from PIL import Image, UnidentifiedImageError
-import pandas as pd
-import requests
-from io import BytesIO
-import urllib.parse
-
-Image.MAX_IMAGE_PIXELS = None
-
-excel_path = r"C:\Users\inter01\Desktop\bcart_productsこぴー.csv"
-df = pd.read_csv(excel_path, encoding='utf-8-sig')
-
-product_ids = df.iloc[1:, 1]  # B列
-product_names = df.iloc[1:, 2]  # C列
-main_image_paths = df.iloc[1:, 29]  # AD列（メイン画像）
-
-# サブ画像列（CI〜CN → インデックス80〜89）
-sub_image_paths_list = [df.iloc[1:, i] for i in range(80, 90)]
-
-save_dir = "saved_images"
-os.makedirs(save_dir, exist_ok=True)
+from PIL import Image
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model, preprocess = clip.load("ViT-B/32", device=device)
 
-features = []
-valid_ids = []
-valid_names = []
-valid_filenames = []
+data = np.load("image_features.npz")
+features = data["features"]
+ids = data["ids"]
+names = data["names"]
+filenames = data["filenames"]
 
-def process_image(image_path, product_id, product_name, suffix=""):
-    if not pd.notna(image_path):
-        return
+st.title("画像検索デモ（CLIP）")
 
-    image_path = str(image_path)
-    safe_name = re.sub(r'[\\/:*?"<>|]', '_', product_name)
-    filename = f"{product_id}_{safe_name}{suffix}.jpg"
-    filepath = os.path.join(save_dir, filename)
+uploaded_file = st.file_uploader("検索したい画像をアップロードしてください", type=["jpg", "jpeg", "png"])
 
-    try:
-        if image_path.startswith("http"):
-            encoded_url = urllib.parse.quote(image_path, safe=':/')
-            response = requests.get(encoded_url, timeout=10)
-            if response.status_code == 200:
-                image = Image.open(BytesIO(response.content)).convert("RGB")
-                image.save(filepath)
-                print(f"保存しました: {filepath}")
-            else:
-                print(f"画像取得失敗: {image_path} (Status: {response.status_code})")
-                return
-        elif os.path.exists(image_path):
-            image = Image.open(image_path).convert("RGB")
-            image.save(filepath)
-            print(f"保存しました: {filepath}")
-        else:
-            print(f"画像ファイルが見つかりません: {image_path}")
-            return
+# プレースホルダーを作成
+result_area = st.empty()
 
-        image = Image.open(filepath)
-        if image.width < 10 or image.height < 10:
-            print(f"画像サイズが小さすぎるためスキップ: {filepath}")
-            return
+if uploaded_file is not None:
+    # 検索処理
+    image = Image.open(uploaded_file)
+    image_input = preprocess(image).unsqueeze(0).to(device)
 
-        image_input = preprocess(image).unsqueeze(0).to(device)
-        with torch.no_grad():
-            image_features = model.encode_image(image_input)
-            image_features /= image_features.norm(dim=-1, keepdim=True)
+    with torch.no_grad():
+        query_feature = model.encode_image(image_input)
+        query_feature /= query_feature.norm(dim=-1, keepdim=True)
 
-        features.append(image_features.cpu().numpy())
-        valid_ids.append(product_id)
-        valid_names.append(product_name)
-        valid_filenames.append(filename)
+    similarities = (features @ query_feature.cpu().numpy().T).squeeze()
+    top_index = np.argmax(similarities)
+    top_indices = np.argsort(similarities)[::-1][:5]
 
-    except UnidentifiedImageError:
-        print(f"画像読み込み失敗（形式不正）: {filepath}")
-    except Exception as e:
-        print(f"特徴量抽出失敗: {filename} → {type(e).__name__}: {e}")
+    # ✅ プレースホルダーでUIを再構築
+    with result_area.container():
+        col_left, col_right = st.columns([1, 2])
 
-# メイン画像処理
-for pid, name, path in zip(product_ids, product_names, main_image_paths):
-    process_image(path, str(pid), str(name), suffix="_main")
+        # 左側：検索画像
+        with col_left:
+            st.image(image, caption="検索画像", use_container_width=True)
 
-# サブ画像処理
-for i, sub_paths in enumerate(sub_image_paths_list):
-    for pid, name, path in zip(product_ids, product_names, sub_paths):
-        process_image(path, str(pid), str(name), suffix=f"_sub{i+1}")
+        # 右側：最も類似した商品
+        with col_right:
+            st.markdown("### ✅ 最も類似した商品")
+            st.write(f"**ID:** {ids[top_index]}")
+            st.write(f"**商品名:** {names[top_index]}")
+            st.write(f"**類似度:** {similarities[top_index]:.4f}")
 
-# 特徴量保存
-if features:
-    features_array = np.concatenate(features, axis=0)
-    np.savez("image_features.npz",
-                features=features_array,
-                ids=np.array(valid_ids),
-                names=np.array(valid_names),
-                filenames=np.array(valid_filenames))
-    print("CLIP特徴量を image_features.npz に保存しました。")
-else:
-    print("保存する特徴量がありません")
+            try:
+                st.image(Image.open(f"saved_images/{filenames[top_index]}"), caption="類似商品画像", width=250)
+            except FileNotFoundError:
+                st.warning("画像が見つかりません")
+
+            st.markdown("### 🔍 類似した商品（上位5件）")
+            cols = st.columns(5)
+            for i, idx in enumerate(top_indices):
+                with cols[i]:
+                    try:
+                        st.image(Image.open(f"saved_images/{filenames[idx]}"), width=120)
+                    except FileNotFoundError:
+                        st.warning("画像なし")
+                    st.write(f"**ID:** {ids[idx]}")
+                    st.write(names[idx])
+                    st.write(f"{similarities[idx]:.4f}")
